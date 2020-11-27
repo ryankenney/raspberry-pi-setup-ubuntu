@@ -1,10 +1,19 @@
+# Mount location of the SD Card's root filesystem
 export PIPROV_SD_CARD_WRITABLE="/media/$USER/writable"
+# Mount location of the SD Card's Cloud-init filesystem
 export PIPROV_SD_CARD_SYSTEMBOOT="/media/$USER/system-boot"
+# Local workstation known_hosts file
 export PIPROV_WORKSTATION_KNOWNHOSTS="/home/$USER/.ssh/known_hosts"
+# Local workstation public key signature file
+export PIPROV_WORKSTATION_ID_RSA_PUB="/home/$USER/.ssh/id_rsa.pub"
+# Static IP of the new server
 export PIPROV_NET_SERVER_IP="192.168.1.50"
+# Subnet mask number of bits (24 = 255.255.255.0)
 export PIPROV_NET_SUBNET_MASK_BITS="24"
+# IP of the wifi router
 export PIPROV_NET_GATEWAY_IP="192.168.1.1"
+# Name of the wifi network
 export PIPROV_NET_WIFI_NAME="My-Wifi"
+# Password to the wifi network
 export PIPROV_NET_WIFI_PASS="p@ssw0rd!"
-
 

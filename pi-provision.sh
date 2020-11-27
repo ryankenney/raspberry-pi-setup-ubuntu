@@ -1,11 +1,26 @@
 #!/bin/bash
 
-set -e
+set -ex
 
 SCRIPT_FILE="$(basename "$0")"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
-function echo_error_and_exit() {
+function print_usage_and_exit() {
+    echo ""
+    echo "USAGE: $SCRIPT_FILE execute"
+    echo ""
+    echo "(Shows this usage message if \"execute\" not specified.)"
+    echo ""
+    exit 1
+}
+
+function print_action() {
+    echo ""
+    echo "[[[ $1 ]]]"
+    echo ""
+}
+
+function print_error_and_exit() {
     echo "" >&2
     echo "ERROR: $1" >&2
     echo "" >&2
@@ -17,19 +32,19 @@ function verify_required_variable() {
     shift
 
     if [[ "${!var_name}" == "" ]]; then
-        echo_error_and_exit "Missing required variable [${var_name}]"
+        print_error_and_exit "Missing required variable [${var_name}]"
     fi
 }
 
 function verify_dir_exists() {
     if [[ ! -d "$1" ]]; then
-        echo_error_and_exit "Missing required directory [$1]"
+        print_error_and_exit "Missing required directory [$1]"
     fi
 }
 
 function verify_file_exists() {
     if [[ ! -f "$1" ]]; then
-        echo_error_and_exit "Missing required file [$1]"
+        print_error_and_exit "Missing required file [$1]"
     fi
 }
 
@@ -41,9 +56,7 @@ function clear_cloudinit_userdata() {
     local cloudinit_root="$1"
     shift
 
-# TODO: Revert debug
-#    echo "" | sudo tee "$cloudinit_root/user-data" >/dev/null
-    echo "$cloudinit_root/user-data"
+    echo "" | sudo tee "$cloudinit_root/user-data" >/dev/null
 }
 
 
@@ -59,7 +72,7 @@ function generate_sshd_keys() {
       -f "$ssh_keys_dir/ssh_host_rsa_key"
 }
 
-function generate_sshd_cloud_init() {
+function configure_cloudinit_ssh_server() {
     local ssh_keys_dir="$1"
     shift
     local cloudinit_root="$1"
@@ -80,6 +93,10 @@ $(sudo sed 's/^/    /' "$ssh_keys_dir/ssh_host_ed25519_key")
   ecdsa_private: |
 $(sudo sed 's/^/    /' "$ssh_keys_dir/ssh_host_ecdsa_key")
   ecdsa_public: $(sudo cat "$ssh_keys_dir/ssh_host_ecdsa_key.pub")
+
+# Ensure password auth is disbled for SSHd (we require keys)
+ssh_pwauth: false
+
 EOF
 }
 
@@ -102,10 +119,12 @@ function add_server_to_workstation_trust() {
     # but in general I turn off that feature in order to improve auditing.
 }
 
-function configure_cloudinit_user {
+function configure_cloudinit_user() {
     local ssh_keys_dir="$1"
     shift
     local cloudinit_root="$1"
+    shift
+    local workstation_ssh_pub="$1"
     shift
 
     sudo tee -a "$cloudinit_root/user-data" >/dev/null << EOF
@@ -117,10 +136,8 @@ users:
   lock_passwd: true
   # Trust workstation ssh key
   ssh_authorized_keys:
-  - "$(cat /home/$USER/.ssh/id_rsa.pub)"
+  - "$(cat "$workstation_ssh_pub")"
 
-# Ensure password auth is disbled for SSHd (we require keys)
-ssh_pwauth: false
 EOF
 }
 
@@ -151,11 +168,12 @@ wifis:
     access-points:
       ${wifi_name}:
         password: "${wifi_pass}"
+
 EOF
 }
 
 function unmount_sd_card() {
-    local ssh_keys_dir="$1"
+    local filesystem_root="$1"
     shift
     local cloudinit_root="$1"
     shift
@@ -165,9 +183,22 @@ function unmount_sd_card() {
 }
 
 function main() {
+
+    if [[ $# -eq 0 || "$1" == "-h" || "$1" != "execute" ]]; then
+        print_usage_and_exit
+    fi
+
+    # Load the config file if it's defined
+    if [[ -f "$SCRIPT_DIR/pi-provision.config.sh" ]]; then
+        print_action "Loading Config Options"
+        . "$SCRIPT_DIR/pi-provision.config.sh"
+    fi
+
+    print_action "Validating Config Options"
     verify_required_variable PIPROV_SD_CARD_WRITABLE
     verify_required_variable PIPROV_SD_CARD_SYSTEMBOOT
     verify_required_variable PIPROV_WORKSTATION_KNOWNHOSTS
+    verify_required_variable PIPROV_WORKSTATION_ID_RSA_PUB
     verify_required_variable PIPROV_NET_SERVER_IP
     verify_required_variable PIPROV_NET_SUBNET_MASK_BITS
     verify_required_variable PIPROV_NET_GATEWAY_IP
@@ -181,11 +212,17 @@ function main() {
     export PIPROV_SD_CARD_SYSTEMBOOT="$(readlink -f "$PIPROV_SD_CARD_SYSTEMBOOT")"
 
     verify_file_exists "$PIPROV_WORKSTATION_KNOWNHOSTS"
+    verify_file_exists "$PIPROV_WORKSTATION_ID_RSA_PUB"
 
     local ssh_keys_dir="$PIPROV_SD_CARD_WRITABLE/etc/ssh"
 
-    # Wipe the existing Cloud-init userdata
+    # Verify and activate user's sodo access
     # ----
+    verify_sudo_access
+
+    # Wipe the existing Cloud-init user-data
+    # ----
+    print_action "Wiping Cloud-init user-data"
     clear_cloudinit_userdata "$PIPROV_SD_CARD_SYSTEMBOOT"
 
     # Generate the SSH server keys on the SD Card, noting that:
@@ -200,6 +237,7 @@ function main() {
     #   openssh implementation, this could be an issue, but it's easily
     #   resolved by regenerating the keys once the server is up.
     # ----
+    print_action "Generating SSH Server Keys"
     generate_sshd_keys "$ssh_keys_dir"
 
     # Generate the Cloud-init yaml config to load the generated SSH server keys,
@@ -215,17 +253,32 @@ function main() {
     #   so care must be taken. Note that this volume is mounted to the running
     #   Raspberry Pi.
     # ----
-    generate_sshd_cloud_init "$ssh_keys_dir" "$PIPROV_SD_CARD_SYSTEMBOOT"
+    print_action "Generating SSH Cloud-init Config"
+    configure_cloudinit_ssh_server "$ssh_keys_dir" "$PIPROV_SD_CARD_SYSTEMBOOT"
 
     # Add trust of server SSH key to local workstation
     # ----
+    print_action "Adding SSH Server to Workstation known_hosts"
     add_server_to_workstation_trust \
       "$ssh_keys_dir" \
       "$PIPROV_NET_SERVER_IP" \
-       "$PIPROV_WORKSTATION_KNOWNHOSTS"
+      "$PIPROV_WORKSTATION_KNOWNHOSTS"
+
+    # Configure the default user created by Ubuntu:
+    #
+    # * Disable the user's password. (No need for a password.
+    #   We have passwordless sudo and an ssh key for login.)
+    #
+    # * Add trust of the local workstation's ssh key to the Ubuntu user.
+    # ----
+    configure_cloudinit_user \
+      "$ssh_keys_dir" \
+      "$PIPROV_SD_CARD_SYSTEMBOOT" \
+      "$PIPROV_WORKSTATION_ID_RSA_PUB"
 
     # Generate Cloud-init yaml config with wifi connectivity and a static IP
     # ----
+    print_action "Generating SSH Network Config"
     configure_cloudinit_wifi \
       "$ssh_keys_dir" \
       "$PIPROV_NET_SERVER_IP" \
@@ -236,9 +289,10 @@ function main() {
 
     # Unmount the SD Card volumes for safe removal
     # ----
+    print_action "Unmounting SD Card"
     unmount_sd_card \
       "$PIPROV_SD_CARD_WRITABLE" \
-      "$PIPROV_SD_CARD_SYSTEMBOOT" \
+      "$PIPROV_SD_CARD_SYSTEMBOOT"
 }
 
 main "$@"
