@@ -16,9 +16,13 @@ How this compares to the
     * Updates `known_hosts` on the local workstation
     * Updates `authorized_keys` on the SD card
 * Elimininates the need for any password on the default ubuntu user (randomizes it)
-    * NOTE: This means there's no known password for local terminal access by default
+    * **NOTE**: This means there's no known password for local terminal access by default
 * Configures a wifi network on the SD card
 * Auto-reboots the server once provisioned (necessary for wifi to initialize)
+* **NOTE**: The SSH keys are being generated using the standards of our workstation
+  OS (key lengths, etc), not the Ubuntu Server. If the workstation is running an older
+  openssh implementation, this could be an issue, but it's easily resolved by
+  regenerating the keys once the server is up.
 
 
 Usage
