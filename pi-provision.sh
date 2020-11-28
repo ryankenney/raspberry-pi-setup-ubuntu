@@ -53,15 +53,6 @@ function verify_sudo_access() {
     sudo ls / > /dev/null
 }
 
-function clear_cloudinit_userdata() {
-    local cloudinit_root="$1"
-    shift
-
-    # Reset the contents the single required header line
-    echo "#cloud-config" | sudo tee "$cloudinit_root/user-data" >/dev/null
-}
-
-
 function generate_sshd_keys() {
     local ssh_keys_dir="$1"
     shift
@@ -74,25 +65,76 @@ function generate_sshd_keys() {
       -f "$ssh_keys_dir/ssh_host_rsa_key"
 }
 
-function configure_cloudinit_ssh_server() {
-    local ssh_keys_dir="$1"
-    shift
+function generate_cloudinit_userdata() {
     local cloudinit_root="$1"
     shift
+    local workstation_ssh_pub="$1"
+    shift
 
-    # NOTE: Previously, I'd embedded the new SSH server keys in the
-    # Cloud-init config, but from what I've read, it's not a good idea
-    # to put secrets into that config.
-    # I can confirm that Ubuntu Server auto-mounts that on the
-    # Rasberry Pi as world-readable (as /etc/firmware/).
+    sudo tee "$cloudinit_root/user-data" >/dev/null << EOF
+#cloud-config
 
-    # Write out a Cloud-init yaml containing the SSH server config
-    sudo tee -a "$cloudinit_root/user-data" >/dev/null << EOF
+# ----
+# NOTE: I'd previously embedded the new SSH server keys in the
+# Cloud-init config, but from what I've read, it's not a good idea
+# to put secrets into Cloud-init config files directly.
+# In fact, it looks like Ubuntu Server auto-mounts the Cloud-init
+# configs as world-readable (/etc/firmware/), at least for Raspberry Pi.
+# ----
+
+# ----
 # Ensure password auth is disbled for SSHd (we require keys)
+# ----
 ssh_pwauth: false
 
+# ----
 # Prevent delete/recreate of server SSH keys (which we manually generated)
+# ----
 ssh_deletekeys: false
+
+chpasswd:
+  list:
+  # ----
+  # Randomize the default admin's password (RANDOM is a keyword).
+  # We don't need to know this passwords, since we login via ssh,
+  # and sudo is passwordless for this user.
+  #
+  # NOTE: This does mean there is no way to login from a local terminal
+  # without modifying the boot parameters.
+  # ----
+  - ubuntu:RANDOM
+  # ----
+  # Disable expiration of the password so we're not forced to generate
+  # a new one upon login.
+  # ----
+  expire: false
+
+runcmd:
+# ----
+# Populate the authorized_keys file for the default (ubuntu) user.
+# 
+# NOTE: We don't use the Cloud-init "users.<user>.ssh_authorized_keys" config option,
+# because we can't add options to the default user without then replicating
+# all of the settings for that user.
+# ----
+- [ bash, -c, 'echo "$(cat "$workstation_ssh_pub")" >> /home/ubuntu/.ssh/authorized_keys' ]
+- [ chmod, 0600, /home/ubuntu/.ssh/authorized_keys ]
+- [ chown, ubuntu:ubuntu, /home/ubuntu/.ssh/authorized_keys ]
+
+# ----
+# Reboot when Cloud-init is complete.
+#
+# This ensures that the wifi network is given a chance to connect.
+# This might be a bug fixed in a newer Cloud-init version:
+# * https://bugs.launchpad.net/cloud-init/+bug/1814297.
+# ----
+power_state:
+  delay: "now"
+  mode: "reboot"
+  message: "Cloud-init Complete. Rebooting."
+  timeout: 30
+  condition: True
+
 EOF
 }
 
@@ -115,50 +157,7 @@ function add_server_to_workstation_trust() {
     # but in general I turn off that feature in order to improve auditing.
 }
 
-function configure_cloudinit_user() {
-    local ssh_keys_dir="$1"
-    shift
-    local cloudinit_root="$1"
-    shift
-    local workstation_ssh_pub="$1"
-    shift
-
-    sudo tee -a "$cloudinit_root/user-data" >/dev/null << EOF
-
-chpasswd:
-  list:
-  # Randomize the default admin's password (RANDOM is a keyword).
-  # We don't need to know this passwords, since we login via ssh,
-  # and sudo is passwordless for this user.
-  # NOTE: This does mean there is no way to login from a local terminal
-  # without modifying the boot parameters.
-  - ubuntu:RANDOM
-  # Disable expiration of the password so we're not forced to generate
-  # a new one upon login.
-  expire: false
-
-# Populate the authorized_keys file for the default (ubuntu) user.
-# 
-# NOTE: We don't use the Cloud-init "users.<user>.ssh_authorized_keys" config option,
-# because we can't add options to the default user without then replicating
-# all of the settings for that user.
-runcmd:
-- [ bash, -c, 'echo "$(cat "$workstation_ssh_pub")" >> /home/ubuntu/.ssh/authorized_keys' ]
-- [ chmod, 0600, /home/ubuntu/.ssh/authorized_keys ]
-- [ chown, ubuntu:ubuntu, /home/ubuntu/.ssh/authorized_keys ]
-
-# TODO: Move/document this. Needed for wifi to reinit and useful for headless.
-power_state:
-  delay: "now"
-  mode: "reboot"
-  message: "Cloud-init Complete. Rebooting."
-  timeout: 30
-  condition: True
-
-EOF
-}
-
-function configure_cloudinit_wifi() {
+function configure_cloudinit_networkconfig() {
     local cloudinit_root="$1"
     shift
     local server_ip="$1"
@@ -174,6 +173,14 @@ function configure_cloudinit_wifi() {
 
     sudo tee -a "$cloudinit_root/network-config" >/dev/null << EOF
 
+# This is the default config provided with the Ubuntu Server image
+version: 2
+ethernets:
+  eth0:
+    dhcp4: true
+    optional: true
+
+# This is the wifi config we added
 wifis:
   wlan0:
     dhcp4: false
@@ -238,18 +245,8 @@ function main() {
     # ----
     verify_sudo_access
 
-    # Wipe the existing Cloud-init user-data
-    # ----
-    print_action "Wiping Cloud-init user-data"
-    clear_cloudinit_userdata "$PIPROV_SD_CARD_SYSTEMBOOT"
-
     # Generate the SSH server keys on the SD Card, noting that:
     #
-    # * These will technically be wiped from the system
-    #   when Cloud-init bootstraps the OS. However, this is as good
-    #   a place as any to store the files temporarily--it's convenient
-    #   that we're NOT writing these files to our workstation disk.
-    # 
     # * These are being generated using the standards of our workstation
     #   OS (key lengths, etc). If the workstation is running an older
     #   openssh implementation, this could be an issue, but it's easily
@@ -257,18 +254,6 @@ function main() {
     # ----
     print_action "Generating SSH Server Keys"
     generate_sshd_keys "$ssh_keys_dir"
-
-    # Generate the Cloud-init yaml config for the SSH server,
-    # noting that:
-    #
-    # * Technically, we could have simply set `ssh_deletekeys` to `false`
-    #   in the Cloud-init config, and there would have been no need to communicate
-    #   the keys via yaml, but I thought this this was a more complete example
-    #   for future uses of Cloud-init--ones in which I don't have direct access
-    #   to the physical disk.
-    # ----
-    print_action "Generating SSH Cloud-init Config"
-    configure_cloudinit_ssh_server "$ssh_keys_dir" "$PIPROV_SD_CARD_SYSTEMBOOT"
 
     # Add trust of server SSH key to local workstation
     # ----
@@ -278,22 +263,17 @@ function main() {
       "$PIPROV_NET_SERVER_IP" \
       "$PIPROV_WORKSTATION_KNOWNHOSTS"
 
-    # Configure the default user created by Ubuntu:
-    #
-    # * Disable the user's password. (No need for a password.
-    #   We have passwordless sudo and an ssh key for login.)
-    #
-    # * Add trust of the local workstation's ssh key to the Ubuntu user.
+    # Generate the Cloud-init user-data config file
     # ----
-    configure_cloudinit_user \
-      "$ssh_keys_dir" \
+    print_action "Generating Cloud-init user-data"
+    generate_cloudinit_userdata \
       "$PIPROV_SD_CARD_SYSTEMBOOT" \
       "$PIPROV_WORKSTATION_ID_RSA_PUB"
 
-    # Generate Cloud-init yaml config with wifi connectivity and a static IP
+    # Generate Cloud-init network-config with wifi connectivity and a static IP
     # ----
-    print_action "Generating Network Config"
-    configure_cloudinit_wifi \
+    print_action "Generating Cloud-init network-config"
+    configure_cloudinit_networkconfig \
       "$PIPROV_SD_CARD_SYSTEMBOOT" \
       "$PIPROV_NET_SERVER_IP" \
       "$PIPROV_NET_SUBNET_MASK_BITS" \
@@ -307,6 +287,8 @@ function main() {
     unmount_sd_card \
       "$PIPROV_SD_CARD_WRITABLE" \
       "$PIPROV_SD_CARD_SYSTEMBOOT"
+
+    print_action "SUCCESS"
 }
 
 main "$@"
