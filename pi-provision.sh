@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ex
+set -e
 
 SCRIPT_FILE="$(basename "$0")"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -49,14 +49,16 @@ function verify_file_exists() {
 }
 
 function verify_sudo_access() {
-    sudo ls
+    # Just run any command that will trigger a sudo login prompt
+    sudo ls / > /dev/null
 }
 
 function clear_cloudinit_userdata() {
     local cloudinit_root="$1"
     shift
 
-    echo "" | sudo tee "$cloudinit_root/user-data" >/dev/null
+    # Reset the contents the single required header line
+    echo "#cloud-config" | sudo tee "$cloudinit_root/user-data" >/dev/null
 }
 
 
@@ -78,25 +80,19 @@ function configure_cloudinit_ssh_server() {
     local cloudinit_root="$1"
     shift
 
-    # Write out a Cloud-init yaml containing the SSH server keys.
-    # "sed 's/^/    /'": Indents the content to match the yaml.
+    # NOTE: Previously, I'd embedded the new SSH server keys in the
+    # Cloud-init config, but from what I've read, it's not a good idea
+    # to put secrets into that config.
+    # I can confirm that Ubuntu Server auto-mounts that on the
+    # Rasberry Pi as world-readable (as /etc/firmware/).
+
+    # Write out a Cloud-init yaml containing the SSH server config
     sudo tee -a "$cloudinit_root/user-data" >/dev/null << EOF
-ssh_keys:
-  rsa_private: |
-$(sudo sed 's/^/    /' "$ssh_keys_dir/ssh_host_rsa_key")
-  rsa_public: $(sudo cat "$ssh_keys_dir/ssh_host_rsa_key.pub")
-
-  ed25519_private: |
-$(sudo sed 's/^/    /' "$ssh_keys_dir/ssh_host_ed25519_key")
-  ed25519_public: $(sudo cat "$ssh_keys_dir/ssh_host_ed25519_key.pub")
-
-  ecdsa_private: |
-$(sudo sed 's/^/    /' "$ssh_keys_dir/ssh_host_ecdsa_key")
-  ecdsa_public: $(sudo cat "$ssh_keys_dir/ssh_host_ecdsa_key.pub")
-
 # Ensure password auth is disbled for SSHd (we require keys)
 ssh_pwauth: false
 
+# Prevent delete/recreate of server SSH keys (which we manually generated)
+ssh_deletekeys: false
 EOF
 }
 
@@ -128,15 +124,36 @@ function configure_cloudinit_user() {
     shift
 
     sudo tee -a "$cloudinit_root/user-data" >/dev/null << EOF
-# Provision the default user
-users:
-- name: ubuntu
-  # The default user in ubuntu has passwordless sudo,
-  # and we're using up ssh key auth, so there's no need for a password.
-  lock_passwd: true
-  # Trust workstation ssh key
-  ssh_authorized_keys:
-  - "$(cat "$workstation_ssh_pub")"
+
+chpasswd:
+  list:
+  # Randomize the default admin's password (RANDOM is a keyword).
+  # We don't need to know this passwords, since we login via ssh,
+  # and sudo is passwordless for this user.
+  # NOTE: This does mean there is no way to login from a local terminal
+  # without modifying the boot parameters.
+  - ubuntu:RANDOM
+  # Disable expiration of the password so we're not forced to generate
+  # a new one upon login.
+  expire: false
+
+# Populate the authorized_keys file for the default (ubuntu) user.
+# 
+# NOTE: We don't use the Cloud-init "users.<user>.ssh_authorized_keys" config option,
+# because we can't add options to the default user without then replicating
+# all of the settings for that user.
+runcmd:
+- [ bash, -c, 'echo "$(cat "$workstation_ssh_pub")" >> /home/ubuntu/.ssh/authorized_keys' ]
+- [ chmod, 0600, /home/ubuntu/.ssh/authorized_keys ]
+- [ chown, ubuntu:ubuntu, /home/ubuntu/.ssh/authorized_keys ]
+
+# TODO: Move/document this. Needed for wifi to reinit and useful for headless.
+power_state:
+  delay: "now"
+  mode: "reboot"
+  message: "Cloud-init Complete. Rebooting."
+  timeout: 30
+  condition: True
 
 EOF
 }
@@ -155,7 +172,8 @@ function configure_cloudinit_wifi() {
     local wifi_pass="$1"
     shift
 
-    echo sudo tee -a "$cloudinit_root/network-config" >/dev/null << EOF
+    sudo tee -a "$cloudinit_root/network-config" >/dev/null << EOF
+
 wifis:
   wlan0:
     dhcp4: false
@@ -166,7 +184,7 @@ wifis:
       addresses: ["1.1.1.1", "8.8.8.8", "8.8.4.4"]
     optional: true
     access-points:
-      ${wifi_name}:
+      "${wifi_name}":
         password: "${wifi_pass}"
 
 EOF
@@ -240,7 +258,7 @@ function main() {
     print_action "Generating SSH Server Keys"
     generate_sshd_keys "$ssh_keys_dir"
 
-    # Generate the Cloud-init yaml config to load the generated SSH server keys,
+    # Generate the Cloud-init yaml config for the SSH server,
     # noting that:
     #
     # * Technically, we could have simply set `ssh_deletekeys` to `false`
@@ -248,10 +266,6 @@ function main() {
     #   the keys via yaml, but I thought this this was a more complete example
     #   for future uses of Cloud-init--ones in which I don't have direct access
     #   to the physical disk.
-    #   
-    # * The Cloud-init config file now contains "secret" data (private keys),
-    #   so care must be taken. Note that this volume is mounted to the running
-    #   Raspberry Pi.
     # ----
     print_action "Generating SSH Cloud-init Config"
     configure_cloudinit_ssh_server "$ssh_keys_dir" "$PIPROV_SD_CARD_SYSTEMBOOT"
@@ -278,9 +292,9 @@ function main() {
 
     # Generate Cloud-init yaml config with wifi connectivity and a static IP
     # ----
-    print_action "Generating SSH Network Config"
+    print_action "Generating Network Config"
     configure_cloudinit_wifi \
-      "$ssh_keys_dir" \
+      "$PIPROV_SD_CARD_SYSTEMBOOT" \
       "$PIPROV_NET_SERVER_IP" \
       "$PIPROV_NET_SUBNET_MASK_BITS" \
       "$PIPROV_NET_GATEWAY_IP" \
