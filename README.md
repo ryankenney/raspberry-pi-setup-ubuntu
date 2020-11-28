@@ -1,4 +1,4 @@
-raspberry-pi-ubuntu-bootstrap
+raspberry-pi-setup-ubuntu
 ================
 
 Overview
