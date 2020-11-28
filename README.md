@@ -21,14 +21,14 @@ How this compares to the
 * Auto-reboots the server once provisioned (necessary for wifi to initialize)
 
 
-Procedure
+Usage
 ----------------
 
 NOTE: These instructions were documented against Ubuntu 20.04 LTS as a workstation.
 
-* [Load the Raspberry Pi Image](docs/Load-the-Raspberry-Pi-Image.md)
-* [Configure the Script](docs/Configure-the-Script.md)
-* [Run the Script](docs/Run-the-Script.md)
-* [Use the Raspberry Pi](docs/Use-the-Raspberry-Pi.md)
+1. [Load the Raspberry Pi Image](docs/Load-the-Raspberry-Pi-Image.md)
+2. [Configure the Script](docs/Configure-the-Script.md)
+3. [Run the Script](docs/Run-the-Script.md)
+3. [Use the Raspberry Pi](docs/Use-the-Raspberry-Pi.md)
 
 
