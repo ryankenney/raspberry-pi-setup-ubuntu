@@ -172,27 +172,27 @@ function configure_cloudinit_networkconfig() {
     shift
 
     sudo tee -a "$cloudinit_root/network-config" >/dev/null << EOF
-
-# This is the default config provided with the Ubuntu Server image
-version: 2
-ethernets:
-  eth0:
-    dhcp4: true
-    optional: true
-
-# This is the wifi config we added
-wifis:
-  wlan0:
-    dhcp4: false
-    addresses: ["${server_ip}/${subnet_mask_bits}"]
-    gateway4: "${router_ip}"
-    nameservers:
-      # Cloudflare, then Google
-      addresses: ["1.1.1.1", "8.8.8.8", "8.8.4.4"]
-    optional: true
-    access-points:
-      "${wifi_name}":
-        password: "${wifi_pass}"
+network:
+  # This is the default config provided with the Ubuntu Server image
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      optional: true
+  
+  # This is the wifi config we added
+  wifis:
+    wlan0:
+      dhcp4: false
+      addresses: ["${server_ip}/${subnet_mask_bits}"]
+      gateway4: "${router_ip}"
+      nameservers:
+        # Cloudflare, then Google
+        addresses: ["1.1.1.1", "8.8.8.8", "8.8.4.4"]
+      optional: true
+      access-points:
+        "${wifi_name}":
+          password: "${wifi_pass}"
 
 EOF
 }
